@@ -1,0 +1,23 @@
+{
+  "name": "xcoorp/swissid-socialite",
+  "description": "Swiss ID OAuth2 Provider for Laravel Socialite",
+  "license": "MIT",
+  "keywords": [
+    "swissid",
+    "swiss-id",
+    "laravel",
+    "oauth",
+    "provider",
+    "socialite"
+  ],
+  "require": {
+    "php": "^8.3",
+    "ext-json": "*",
+    "socialiteproviders/manager": "^4.4"
+  },
+  "autoload": {
+    "psr-4": {
+      "XCoorp\\SwissIDSocialite\\": ""
+    }
+  }
+}
