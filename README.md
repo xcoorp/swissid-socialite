@@ -26,6 +26,12 @@ Please see the [Base Installation Guide](https://socialiteproviders.com/usage/),
     'redirect' => env('SWISSID_REDIRECT_URL'),
     'base_url' => env('SWISSID_BASE_URL'),
     'issuer' => env('SWISSID_ISSUER'),
+    'requested_authentication' => 'qoa2', // qoa1 = single factor authentication (username, password), qoa2 = two factor authentication required (username, password, sms code)
+    'claims' => [                         // OPTIONAL: Specify additional claims to be requested
+        'urn:swissid:qor' => [
+            'value' => 'qor2',
+        ],
+    ],
 ],
 ```
 

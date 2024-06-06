@@ -34,7 +34,7 @@ class Provider extends AbstractProvider
 
     public static function additionalConfigKeys(): array
     {
-        return ['base_url', 'issuer'];
+        return ['base_url', 'issuer', 'claims', 'requested_authentication'];
     }
 
     public function getAccessTokenResponse($code): array
@@ -53,7 +53,18 @@ class Provider extends AbstractProvider
     {
         $this->request->session()->put('nonce', $nonce = $this->getNonce());
 
-        return $this->with(['nonce' => $nonce])->buildAuthUrlFromBase($this->getSwissIDUrl().'/authorize', $state);
+        $include = ['nonce' => $nonce];
+        $claims = $this->getConfig('claims');
+        if ($claims !== null && Arr::accessible($claims)) {
+            $include['claims'] = json_encode($claims);
+        }
+
+        $requestedAuthentication = $this->getConfig('requested_authentication');
+        if ($requestedAuthentication !== null) {
+            $include['acr_values'] = $requestedAuthentication;
+        }
+
+        return $this->with($include)->buildAuthUrlFromBase($this->getSwissIDUrl().'/authorize', $state);
     }
 
     protected function getTokenUrl(): string
