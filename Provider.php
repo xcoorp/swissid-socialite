@@ -238,6 +238,7 @@ EOD;
         return (new User())->setRaw($user)->map([
             'id' => Arr::get($user, 'sub'),
             'email' => Arr::get($user, 'email'),
+            'name' => Arr::get($user, 'given_name') . ' ' . Arr::get($user, 'family_name'),
         ]);
     }
 
