@@ -2,6 +2,7 @@
 
 namespace XCoorp\SwissIDSocialite;
 
+use Psr\Http\Message\StreamInterface;
 use XCoorp\SwissIDSocialite\Exceptions\InvalidAccessTokenHash;
 use XCoorp\SwissIDSocialite\Exceptions\InvalidAudienceException;
 use XCoorp\SwissIDSocialite\Exceptions\InvalidAuthorizationTokenHash;
@@ -203,12 +204,12 @@ EOD;
             throw new IssueTokenExpiredException();
         }
 
-        $this->verifyCommonJWTParts($idTokenPayload);
+        $this->verifyCommonJWTParts($idTokenPayload, $this->clientId, $this->getConfig('issuer'));
 
         return $response;
     }
 
-    protected function getUserByToken($token)
+    protected function getUserByToken($token): array
     {
         $response = $this->getHttpClient()->get($this->getSwissIDUrl().'/userinfo', [
             RequestOptions::HEADERS => [
@@ -216,7 +217,22 @@ EOD;
             ],
         ]);
 
-        $jwtToken = $response->getBody();
+        return static::verifyUserTokenResponse($response->getBody(), $this->clientId, $this->clientSecret, $this->getConfig('issuer'));
+    }
+
+    /**
+     * We need to make this public static, since laravel socialite does not yet allow to pass an access token to a userInfo request
+     * which means we have to do it ourselves, but to avoid duplicate code we can just call this to verify an userinfo response
+     *
+     * @param StreamInterface $jwtToken
+     * @param string $clientID
+     * @param string $clientSecret
+     * @param string $issuer
+     *
+     * @return array
+     */
+    public static function verifyUserTokenResponse(StreamInterface $jwtToken, string $clientID, string $clientSecret, string $issuer): array
+    {
         $idTokenParts = explode('.', $jwtToken);
 
         $idTokenHeader = json_decode(base64_decode(strtr($idTokenParts[0], '-_', '+/')), true);
@@ -230,21 +246,35 @@ EOD;
         $signature = base64_decode(strtr($idTokenParts[2], '-_', '+/'));
         $data = $idTokenParts[0].'.'.$idTokenParts[1];
 
-        $signatureValid = hash_equals(hash_hmac('sha256', $data, $this->clientSecret, true), $signature);
+        $signatureValid = hash_equals(hash_hmac('sha256', $data, $clientSecret, true), $signature);
 
         if ( ! $signatureValid) {
             throw new InvalidJWTSignatureException('Signature is invalid.');
         }
 
-        $this->verifyCommonJWTParts($idTokenPayload);
+        static::verifyCommonJWTParts($idTokenPayload, $clientID, $issuer);
 
         return $idTokenPayload;
+
     }
 
     /**
      * @inheritdoc
      */
     protected function mapUserToObject(array $user): User
+    {
+        return static::mapUser($user);
+    }
+
+    /**
+     * Again we make this public static to allow for it to be used outside of this provider, since socialite does not allow
+     * to pass an access token to the userInfo endpoint
+     *
+     * @param array $user
+     *
+     * @return User
+     */
+    public static function mapUser(array $user): User
     {
         return (new User())->setRaw($user)->map([
             'id' => Arr::get($user, 'sub'),
@@ -253,20 +283,20 @@ EOD;
         ]);
     }
 
-    protected function verifyCommonJWTParts(array $idTokenPayload): void
+    public static function verifyCommonJWTParts(array $idTokenPayload, string $clientID, string $issuer): void
     {
         // Validate the issuer
-        if ($idTokenPayload['iss'] !== $this->getConfig('issuer')) {
+        if ($idTokenPayload['iss'] !== $issuer) {
             throw new InvalidIssuerException('Issuer mismatch.');
         }
 
         // Validate the audience
-        if (is_string($idTokenPayload['aud']) && $idTokenPayload['aud'] !== $this->clientId) {
+        if (is_string($idTokenPayload['aud']) && $idTokenPayload['aud'] !== $clientID) {
             throw new InvalidAudienceException('Audience mismatch.');
         }
 
         if (is_array($idTokenPayload['aud'])) {
-            if ( ! in_array($this->clientId, $idTokenPayload['aud'])) {
+            if ( ! in_array($clientID, $idTokenPayload['aud'])) {
                 throw new InvalidAudienceException('None of the audiences received match.');
             }
 
@@ -275,7 +305,7 @@ EOD;
             }
         }
 
-        if (isset($idTokenPayload['azp']) && $idTokenPayload['azp'] !== $this->clientId) {
+        if (isset($idTokenPayload['azp']) && $idTokenPayload['azp'] !== $clientID) {
             throw new InvalidAuthorizedPartyException('AZP does not match the client id.');
         }
     }
