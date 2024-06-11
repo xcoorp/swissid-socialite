@@ -2,7 +2,7 @@
 
 namespace XCoorp\SwissIDSocialite;
 
-use Psr\Http\Message\StreamInterface;
+use GuzzleHttp\Exception\GuzzleException;
 use XCoorp\SwissIDSocialite\Exceptions\InvalidAccessTokenHash;
 use XCoorp\SwissIDSocialite\Exceptions\InvalidAudienceException;
 use XCoorp\SwissIDSocialite\Exceptions\InvalidAuthorizationTokenHash;
@@ -23,6 +23,9 @@ class Provider extends AbstractProvider
 {
     public const IDENTIFIER = 'SWISSID';
 
+    /**
+     * @inheritDoc
+     */
     protected $scopes = [
         'openid',
         'profile',
@@ -31,13 +34,26 @@ class Provider extends AbstractProvider
         'address',
     ];
 
+    /**
+     * @inheritDoc
+     */
     protected $scopeSeparator = ' ';
 
+    /**
+     * @inheritDoc
+     */
     public static function additionalConfigKeys(): array
     {
         return ['base_url', 'issuer', 'claims', 'requested_authentication'];
     }
 
+    /**
+     * @inheritDoc
+     *
+     * Additionally to getting the access token response wa also validate it directly after
+     * @throws GuzzleException
+     * @see parseAndValidateAccessTokenResponse
+     */
     public function getAccessTokenResponse($code): array
     {
         $response = parent::getAccessTokenResponse($code);
@@ -50,6 +66,12 @@ class Provider extends AbstractProvider
         return rtrim($this->getConfig('base_url'), '/');
     }
 
+    /**
+     * @inheritDoc
+     *
+     * SwissID uses the authorization code flow, so we need to include the nonce in the request
+     * to prevent replay attacks, additionally we can include claims and acr_values
+     */
     protected function getAuthUrl($state): string
     {
         $this->request->session()->put('nonce', $nonce = $this->getNonce());
@@ -68,11 +90,20 @@ class Provider extends AbstractProvider
         return $this->with($include)->buildAuthUrlFromBase($this->getSwissIDUrl().'/authorize', $state);
     }
 
+    /**
+     * @inheritDoc
+     */
     protected function getTokenUrl(): string
     {
         return $this->getSwissIDUrl().'/access_token';
     }
 
+    /**
+     * @inheritDoc
+     *
+     * SwissID uses basic auth for the client credentials, so we need to include the client id and secret in the headers,
+     * this is different from the default implementation
+     */
     protected function getTokenHeaders($code): array
     {
         $headers = parent::getTokenHeaders($code);
@@ -84,6 +115,12 @@ class Provider extends AbstractProvider
         return $headers;
     }
 
+    /**
+     * @inheritDoc
+     *
+     * Client id and secret are basic authentication, so we need to remove them from the fields
+     * @see getTokenHeaders
+     */
     protected function getTokenFields($code): array
     {
         $fields = parent::getTokenFields($code);
@@ -98,6 +135,14 @@ class Provider extends AbstractProvider
         return $fields;
     }
 
+    /**
+     * @inheritDoc
+     *
+     * We directly validate the refresh token after getting it
+     * @see parseAndValidateAccessTokenResponse
+     *
+     * @throws GuzzleException
+     */
     protected function getRefreshTokenResponse($refreshToken): array
     {
         $response = json_decode($this->getHttpClient()->post($this->getTokenUrl(), [
@@ -111,17 +156,37 @@ class Provider extends AbstractProvider
         return $this->parseAndValidateAccessTokenResponse($response);
     }
 
+    /**
+     * For security reasons we need to validate the access token response. The following validation checks are performed:
+     * - The id_token is valid and signed with the correct key (Grab the key from the SwissID server)
+     * - The nonce matches the one we sent in the request
+     * - The algorithm is RS256
+     * - The at_hash matches the access token
+     * - The c_hash matches the auth code
+     * - The iat is not older than 5 minutes
+     * - The time is before exp
+     * - The issuer matches the one we expect
+     * - The audience matches the client id
+     * - The azp matches the client id
+     * - The signature is valid
+     *
+     * @see https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation
+     *
+     * @param array       $response     The response from the token endpoint
+     * @param string|null $code         Access token code, if not passed, this is a refresh token request
+     *
+     * @return array
+     *
+     * @throws GuzzleException
+     */
     protected function parseAndValidateAccessTokenResponse(array $response, ?string $code = null): array
     {
-        // Get the id_token from the response and validate it, before returning the response
-        // We do this as an additional security measure to make sure the token is valid
         $idToken = Arr::get($response, 'id_token');
         $idTokenParts = explode('.', $idToken);
 
         $idTokenHeader = json_decode(base64_decode(strtr($idTokenParts[0], '-_', '+/')), true);
         $idTokenPayload = json_decode(base64_decode(strtr($idTokenParts[1], '-_', '+/')), true);
 
-        // If not in the cache we need to download the public key from the SwissID server
         $pubKey = Cache::get('swiss_id_jwt_pub_key_'.$idTokenHeader['kid']);
         if ($pubKey === null) {
             $publicKeyResponse = $this->getHttpClient()->get($this->getSwissIDUrl().'/connect/jwk_uri');
@@ -129,7 +194,6 @@ class Provider extends AbstractProvider
 
             $publicKeys = json_decode((string) $publicKeys, true)['keys'];
 
-            // Now we need to find the key that matches the kid in the header
             $pubKey = null;
             foreach ($publicKeys as $publicKey) {
                 if ($publicKey['kid'] === $idTokenHeader['kid']) {
@@ -145,7 +209,6 @@ class Provider extends AbstractProvider
             Cache::put('swiss_id_jwt_pub_key_'.$idTokenHeader['kid'], $pubKey, 60 * 60 * 24);
         }
 
-        // Verify the signature
         $signature = base64_decode(strtr($idTokenParts[2], '-_', '+/'));
         $data = $idTokenParts[0].'.'.$idTokenParts[1];
 
@@ -164,8 +227,6 @@ EOD;
             throw new InvalidJWTSignatureException('Signature is invalid.');
         }
 
-        // Validate the nonce first to pull it from the session and prevent replay attacks
-        // We check first if a code was present, because that means we are in the authorization code flow
         if ($code) {
             $nonce = $this->request->session()->pull('nonce');
             if ( ! hash_equals($nonce, $idTokenPayload['nonce'])) {
@@ -173,12 +234,10 @@ EOD;
             }
         }
 
-        // Validate the algorithm, swiss id uses RS256 and we enforce it
         if ($idTokenHeader['alg'] !== 'RS256') {
             throw new InvalidJWTAlgorithm('Algorithm must be RS256.');
         }
 
-        // Check if at_hash matches the access token
         if (isset($response['access_token'])) {
             $atHash = $this->computeHash($response['access_token']);
             if (isset($idTokenPayload['at_hash']) && ! hash_equals($atHash, $idTokenPayload['at_hash'])) {
@@ -186,20 +245,17 @@ EOD;
             }
         }
 
-        // Check if c_hash matches the auth code
         if ($code) {
             $cHash = $this->computeHash($code);
             if (isset($idTokenPayload['c_hash']) & ! hash_equals($cHash, $idTokenPayload['c_hash'])) {
                 throw new InvalidAuthorizationTokenHash('Auth code hash mismatch.');
             }
 
-            // Make sure the iat is not older than 5 minutes
             if ( ! isset($idTokenPayload['iat']) || time() - $idTokenPayload['iat'] > 300) {
                 throw new IssueTokenExpiredException('Issued at time is older than 5 minutes.');
             }
         }
 
-        // Make sure time is before exp
         if ( ! isset($idTokenPayload['exp']) || time() >= $idTokenPayload['exp']) {
             throw new IssueTokenExpiredException();
         }
@@ -209,6 +265,13 @@ EOD;
         return $response;
     }
 
+    /**
+     * @inheritDoc
+     *
+     * After getting the userinfo, we immediately validate the JWT, by checking if the signature is valid (client secret is the key).
+     *
+     * @throws GuzzleException
+     */
     protected function getUserByToken($token): array
     {
         $response = $this->getHttpClient()->get($this->getSwissIDUrl().'/userinfo', [
@@ -217,23 +280,8 @@ EOD;
             ],
         ]);
 
-        return static::verifyUserTokenResponse($response->getBody(), $this->clientId, $this->clientSecret, $this->getConfig('issuer'));
-    }
 
-    /**
-     * We need to make this public static, since laravel socialite does not yet allow to pass an access token to a userInfo request
-     * which means we have to do it ourselves, but to avoid duplicate code we can just call this to verify an userinfo response
-     *
-     * @param StreamInterface $jwtToken
-     * @param string $clientID
-     * @param string $clientSecret
-     * @param string $issuer
-     *
-     * @return array
-     */
-    public static function verifyUserTokenResponse(StreamInterface $jwtToken, string $clientID, string $clientSecret, string $issuer): array
-    {
-        $idTokenParts = explode('.', $jwtToken);
+        $idTokenParts = explode('.', $response->getBody());
 
         $idTokenHeader = json_decode(base64_decode(strtr($idTokenParts[0], '-_', '+/')), true);
         $idTokenPayload = json_decode(base64_decode(strtr($idTokenParts[1], '-_', '+/')), true);
@@ -242,39 +290,24 @@ EOD;
             throw new InvalidJWTAlgorithm('Algorithm must be HS256.');
         }
 
-        // We verify the HS256 signature here as well, the key is the octets of the UTF-8 representation of the client secret
         $signature = base64_decode(strtr($idTokenParts[2], '-_', '+/'));
         $data = $idTokenParts[0].'.'.$idTokenParts[1];
 
-        $signatureValid = hash_equals(hash_hmac('sha256', $data, $clientSecret, true), $signature);
+        $signatureValid = hash_equals(hash_hmac('sha256', $data, $this->clientSecret, true), $signature);
 
         if ( ! $signatureValid) {
             throw new InvalidJWTSignatureException('Signature is invalid.');
         }
 
-        static::verifyCommonJWTParts($idTokenPayload, $clientID, $issuer);
+        $this->verifyCommonJWTParts($idTokenPayload, $this->clientId, $this->getConfig('issuer'));
 
         return $idTokenPayload;
-
     }
 
     /**
      * @inheritdoc
      */
     protected function mapUserToObject(array $user): User
-    {
-        return static::mapUser($user);
-    }
-
-    /**
-     * Again we make this public static to allow for it to be used outside of this provider, since socialite does not allow
-     * to pass an access token to the userInfo endpoint
-     *
-     * @param array $user
-     *
-     * @return User
-     */
-    public static function mapUser(array $user): User
     {
         return (new User())->setRaw($user)->map([
             'id' => Arr::get($user, 'sub'),
@@ -283,14 +316,29 @@ EOD;
         ]);
     }
 
-    public static function verifyCommonJWTParts(array $idTokenPayload, string $clientID, string $issuer): void
+    /**
+     * Verify the common parts of the JWT token
+     * which are shared by access and refresh token, as well as the id token. Validates:
+     * - Issuer
+     * - Audience
+     * - Authorized Party
+     *
+     * @see https://openid.net/specs/openid-connect-core-1_0.html#IDTokenValidation
+     * @see https://openid.net/specs/openid-connect-core-1_0.html#RefreshTokenValidation
+     * @see https://openid.net/specs/openid-connect-core-1_0.html#AccessTokenValidation
+     *
+     * @param array  $idTokenPayload
+     * @param string $clientID
+     * @param string $issuer
+     *
+     * @return void
+     */
+    protected function verifyCommonJWTParts(array $idTokenPayload, string $clientID, string $issuer): void
     {
-        // Validate the issuer
         if ($idTokenPayload['iss'] !== $issuer) {
             throw new InvalidIssuerException('Issuer mismatch.');
         }
 
-        // Validate the audience
         if (is_string($idTokenPayload['aud']) && $idTokenPayload['aud'] !== $clientID) {
             throw new InvalidAudienceException('Audience mismatch.');
         }
