@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/xcoorp/swissid-socialite/compare/v1.0.0...v1.0.1) (2025-01-14)
+
+
+### Miscellaneous Chores
+
+* **deps:** pin googleapis/release-please-action action to 7987652 ([#3](https://github.com/xcoorp/swissid-socialite/issues/3)) ([fce9223](https://github.com/xcoorp/swissid-socialite/commit/fce9223c25d9ce41f221354cad533c48d45da675))
+
 ## 1.0.0 (2024-11-12)
 
 
